@@ -156,6 +156,14 @@ export async function exchangeCodeForTokens(code: string): Promise<ClioTokens> {
       tokens.created_at = Math.floor(Date.now() / 1000);
     }
 
+    // Clio returns refresh_token by default on code exchange.
+    // Refresh tokens do not expire — store and reuse across refreshes.
+    if (!tokens.refresh_token) {
+      logger.warn('WARNING: No refresh_token received from Clio. Token will expire without ability to auto-refresh.');
+    } else {
+      logger.info('Refresh token received successfully');
+    }
+
     return tokens;
   } catch (error) {
     logger.error("Error exchanging code for tokens:", error);
@@ -215,6 +223,11 @@ export async function refreshAccessToken(refreshToken: string): Promise<ClioToke
     // Add created_at timestamp if not provided by the API
     if (!tokens.created_at) {
       tokens.created_at = Math.floor(Date.now() / 1000);
+    }
+
+    // Clio does not return a new refresh_token on refresh — preserve the original
+    if (!tokens.refresh_token) {
+      tokens.refresh_token = refreshToken;
     }
 
     return tokens;

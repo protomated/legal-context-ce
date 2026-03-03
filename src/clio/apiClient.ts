@@ -19,6 +19,9 @@ const RATE_LIMIT_RETRY_DELAY = 2000; // 2 seconds
 const MAX_REQUESTS_PER_MINUTE = 48; // Clio's limit is 50, we use 48 to be safe
 const MINUTE_IN_MS = 60 * 1000;
 
+// Proactive refresh: refresh when 80% of token lifetime has elapsed
+const TOKEN_REFRESH_THRESHOLD = 0.8;
+
 // Clio API response interfaces
 export interface ClioDocument {
   id: string;
@@ -100,6 +103,7 @@ export class ClioApiClient {
   private tokens: ClioTokens | null = null;
   private baseUrl: string;
   private requestTimestamps: number[] = [];
+  private refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
     try {
@@ -108,6 +112,66 @@ export class ClioApiClient {
       // Default to US region if Clio config validation fails
       this.baseUrl = 'https://app.clio.com';
       logger.warn('Using default Clio API base URL due to missing configuration');
+    }
+  }
+
+  /**
+   * Schedule a proactive token refresh before the token expires.
+   * Refreshes at 80% of the token's lifetime to avoid expiration during use.
+   */
+  private scheduleTokenRefresh(): void {
+    // Clear any existing timer
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = null;
+    }
+
+    if (!this.tokens || !this.tokens.created_at || !this.tokens.expires_in) {
+      return;
+    }
+
+    if (!this.tokens.refresh_token) {
+      logger.warn('No refresh token available — cannot schedule automatic refresh');
+      return;
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const expiresAt = this.tokens.created_at + this.tokens.expires_in;
+    const lifetime = this.tokens.expires_in;
+    const refreshAt = this.tokens.created_at + Math.floor(lifetime * TOKEN_REFRESH_THRESHOLD);
+    const delaySeconds = Math.max(refreshAt - now, 60); // At least 60 seconds from now
+
+    logger.info(`Token expires at ${new Date(expiresAt * 1000).toISOString()}`);
+    logger.info(`Scheduling proactive refresh in ${Math.floor(delaySeconds / 3600)}h ${Math.floor((delaySeconds % 3600) / 60)}m`);
+
+    this.refreshTimer = setTimeout(async () => {
+      await this.proactiveRefresh();
+    }, delaySeconds * 1000);
+  }
+
+  /**
+   * Perform a proactive token refresh and reschedule the next one.
+   */
+  private async proactiveRefresh(): Promise<void> {
+    if (!this.tokens?.refresh_token) {
+      logger.warn('Proactive refresh skipped — no refresh token');
+      return;
+    }
+
+    try {
+      logger.info('Proactive token refresh starting...');
+      this.tokens = await refreshAccessToken(this.tokens.refresh_token);
+      await secureTokenStorage.saveTokens(this.tokens);
+      logger.info('Proactive token refresh successful');
+
+      // Schedule the next refresh
+      this.scheduleTokenRefresh();
+    } catch (error) {
+      logger.error('Proactive token refresh failed:', error);
+      // Retry in 5 minutes
+      this.refreshTimer = setTimeout(async () => {
+        await this.proactiveRefresh();
+      }, 5 * 60 * 1000);
     }
   }
 
@@ -172,6 +236,10 @@ export class ClioApiClient {
         logger.info('Clio API token validated successfully');
         isAuthenticated = true;
         authenticationFailed = false;
+
+        // Schedule proactive token refresh
+        this.scheduleTokenRefresh();
+
         return true;
       } catch (validationError) {
         if (validationError instanceof Error && validationError.message === 'Authentication failed') {
@@ -199,6 +267,10 @@ export class ClioApiClient {
     isAuthenticated = false;
     authenticationFailed = false;
     this.tokens = null;
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = null;
+    }
     logger.info('Clio API client authentication status reset');
   }
 
@@ -273,6 +345,7 @@ export class ClioApiClient {
       try {
         this.tokens = await refreshAccessToken(this.tokens.refresh_token);
         await secureTokenStorage.saveTokens(this.tokens);
+        this.scheduleTokenRefresh();
       } catch (refreshError) {
         logger.error('Failed to refresh token. Re-authentication required.', refreshError);
         await forceReauthentication();
@@ -361,6 +434,7 @@ export class ClioApiClient {
                 this.tokens = await refreshAccessToken(this.tokens.refresh_token);
                 await secureTokenStorage.saveTokens(this.tokens);
                 logger.info('Token refreshed after 401 error, retrying request');
+                this.scheduleTokenRefresh();
 
                 // Update the Authorization header with new token
                 headers['Authorization'] = `Bearer ${this.tokens.access_token}`;

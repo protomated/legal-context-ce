@@ -40,6 +40,13 @@ async function runSimpleAuthTest() {
   const existingTokens = await secureTokenStorage.loadTokens();
   if (existingTokens) {
     console.log(`${colors.yellow}Existing Clio tokens found.${colors.reset}`);
+    console.log(`  Refresh token: ${existingTokens.refresh_token ? colors.green + 'Present' + colors.reset : colors.red + 'MISSING' + colors.reset}`);
+    if (existingTokens.created_at && existingTokens.expires_in) {
+      const expiresAt = existingTokens.created_at + existingTokens.expires_in;
+      const remainingSec = expiresAt - Math.floor(Date.now() / 1000);
+      const remainingDays = Math.floor(remainingSec / 86400);
+      console.log(`  Expires: ${new Date(expiresAt * 1000).toISOString()} (${remainingDays > 0 ? remainingDays + ' days' : 'EXPIRED'})`);
+    }
     const answer = await question(`Do you want to test these existing tokens? (y/n): `);
 
     if (answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes') {
@@ -117,6 +124,14 @@ async function runSimpleAuthTest() {
       if (tokens) {
         authenticated = true;
         console.log(`\n${colors.green}✓ Authentication successful! Tokens received and stored.${colors.reset}`);
+
+        // Show refresh token status
+        if (tokens.refresh_token) {
+          console.log(`${colors.green}✓ Refresh token received — automatic token renewal is enabled.${colors.reset}`);
+        } else {
+          console.log(`${colors.red}✗ WARNING: No refresh token received. Token will expire in ${tokens.expires_in ? Math.floor(tokens.expires_in / 86400) : '?'} days without auto-renewal.${colors.reset}`);
+          console.log(`${colors.yellow}  Re-run auth to retry. Clio should return a refresh token by default.${colors.reset}`);
+        }
 
         // Test the tokens with a simple API call
         await clioApiClient.initialize();
